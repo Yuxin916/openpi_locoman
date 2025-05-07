@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.locoman_policy as locoman_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.optimizer as _optimizer
@@ -322,6 +323,50 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
         )
 
+class LeRobotLocoManDataConfig(DataConfigFactory):
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/main_image": "main_image",
+                        "observation/wrist_image_right": "wrist_image_right",
+                        "observation/wrist_image_left": "wrist_image_left",
+                        "observation/image_mask": "image_mask",
+                        "observation/state": "state",
+                        "observation/state_mask": "state_mask",
+                        "actions": "actions",
+                        "actions_mask": "actions_mask",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[locoman_policy.LocoManInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
+            outputs=[locoman_policy.LocoManOutputs()],
+        )
+
+        # the delta action transform
+        delta_action_mask = _transforms.make_bool_mask(6, -1)
+        data_transforms = data_transforms.push(
+            inputs=[_transforms.DeltaActions(delta_action_mask)],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+        )
+
+        # Model transforms include things like tokenizing the prompt and action targets
+        # You do not need to change anything here for your own dataset.
+        model_transforms = ModelTransformFactory()(model_config)
+
+        # We return all data transforms for training and inference. No need to change anything here.
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
 
 @dataclasses.dataclass(frozen=True)
 class TrainConfig:
@@ -504,6 +549,41 @@ _CONFIGS = [
         # Below you can define other hyperparameters like the learning rate, number of training steps, etc.
         # Check the base TrainConfig class for a full list of available hyperparameters.
         num_train_steps=30_000,
+    ),
+    TrainConfig(
+        # Name of the config. Must be unique. Will be used to reference this config.
+        name="pi0_locoman",
+        # Experiment name. Will be used to name the metadata and checkpoint directories.
+        exp_name='locoman_1ep',
+        # Defines the model config. Some attributes (action_dim, action_horizon, and max_token_len) are shared by all models
+        # -- see BaseModelConfig. Specific model implementations (e.g., Pi0Config) inherit from BaseModelConfig and may
+        # define additional attributes.
+        # Here is an example of loading a pi0 model for LoRA fine-tuning.
+        model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        data=LeRobotLocoManDataConfig(
+            repo_id="tsaisplus/locoman",
+            base_config=DataConfig(
+                local_files_only=True,
+                prompt_from_task=True,
+            ),
+        ),
+        # A weight loader can optionally load (possibly partial) weights from disk after the model is initialized.
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        # Freeze all original model weights and only train the LoRA weights.
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA fine-tuning.
+        # controls Exponential Moving Average (EMA) of the model weights during training
+        # EMA would track changes of just a small LoRA weight subset, which offers minimal benefit.
+        # Worse, maintaining EMA doubles memory usage for those trainable parameters
+        ema_decay=None,
+        # Global batch size.
+        batch_size=2,
+        # Number of workers to use for the data loader. Increasing this number will speed up data loading but
+        # will increase memory and CPU usage.
+        num_workers=2,
     ),
     TrainConfig(
         name="pi0_libero_low_mem_finetune",
