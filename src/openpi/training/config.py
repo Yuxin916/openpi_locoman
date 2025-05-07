@@ -553,15 +553,17 @@ _CONFIGS = [
     TrainConfig(
         # Name of the config. Must be unique. Will be used to reference this config.
         name="pi0_locoman",
+        # Project name.
+        project_name="openpi",
         # Experiment name. Will be used to name the metadata and checkpoint directories.
-        exp_name='locoman_1ep',
+        exp_name='pour_bimanual',
         # Defines the model config. Some attributes (action_dim, action_horizon, and max_token_len) are shared by all models
         # -- see BaseModelConfig. Specific model implementations (e.g., Pi0Config) inherit from BaseModelConfig and may
         # define additional attributes.
         # Here is an example of loading a pi0 model for LoRA fine-tuning.
         model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
         data=LeRobotLocoManDataConfig(
-            repo_id="tsaisplus/locoman",
+            repo_id="locoman/pour_bimanual",
             base_config=DataConfig(
                 local_files_only=True,
                 prompt_from_task=True,
@@ -581,9 +583,27 @@ _CONFIGS = [
         ema_decay=None,
         # Global batch size.
         batch_size=2,
+        # Random seed that will be used by random generators during training.
+        seed=42,
         # Number of workers to use for the data loader. Increasing this number will speed up data loading but
         # will increase memory and CPU usage.
         num_workers=2,
+        # Base directory for config assets (e.g., norm stats).
+        assets_base_dir="../assets",
+        # Base directory for checkpoints.
+        checkpoint_base_dir="../checkpoints",
+        # How often (in steps) to log training metrics.
+        log_interval=100,
+        # How often (in steps) to save checkpoints.
+        save_interval=1000,
+        # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
+        keep_period=5000,
+        # If true, will overwrite the checkpoint directory if it already exists.
+        overwrite=False,
+        # If true, will resume training from the last checkpoint.
+        resume=False,
+        # If true, will enable wandb logging.
+        wandb_enabled=True,
     ),
     TrainConfig(
         name="pi0_libero_low_mem_finetune",

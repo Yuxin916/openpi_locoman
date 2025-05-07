@@ -194,20 +194,25 @@ def main(config: _config.TrainConfig):
     init_logging()
     logging.info(f"Running on: {platform.node()}")
 
+    # Ensures batch size can be evenly divided across available JAX devices (like GPUs
     if config.batch_size % jax.device_count() != 0:
         raise ValueError(
             f"Batch size {config.batch_size} must be divisible by the number of devices {jax.device_count()}."
         )
 
+    # Tells JAX where to cache compiled XLA programs (reduces recompile time across runs)
     jax.config.update("jax_compilation_cache_dir", str(epath.Path("~/.cache/jax").expanduser()))
 
+    # initialize random keys, one for training, one for initialization
     rng = jax.random.key(config.seed)
     train_rng, init_rng = jax.random.split(rng)
 
+    # Creates a device mesh (e.g., 2x2 layout of GPUs) for parallelization
     mesh = sharding.make_mesh(config.fsdp_devices)
     data_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(sharding.DATA_AXIS))
     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
+    # initialize the checkpoint and wandb manager
     checkpoint_manager, resuming = _checkpoints.initialize_checkpoint_dir(
         config.checkpoint_dir,
         keep_period=config.keep_period,
@@ -216,16 +221,30 @@ def main(config: _config.TrainConfig):
     )
     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
 
+    # create DataLoader with JAX-compatible sharding
     data_loader = _data_loader.create_data_loader(
         config,
         sharding=data_sharding,
         num_workers=config.num_workers,
         shuffle=True,
     )
+    # Gets the first batch to warm up the training loop
+    # TODO: the data batch here already preprocessed and tokenized.
+    # [0].images['base_0_rgb']: (2, 224, 224, 3)@float32
+    # [0].images['left_wrist_0_rgb']: (2, 224, 224, 3)@float32
+    # [0].images['right_wrist_0_rgb']: (2, 224, 224, 3)@float32
+    # [0].image_masks['base_0_rgb']: (2,)@bool
+    # [0].image_masks['left_wrist_0_rgb']: (2,)@bool
+    # [0].image_masks['right_wrist_0_rgb']: (2,)@bool
+    # [0].state: (2, 32)@float32
+    # [0].tokenized_prompt: (2, 48)@int32
+    # [0].tokenized_prompt_mask: (2, 48)@bool
+    # [1]: (2, 50, 32)@float32 (219124:train.py:231)
     data_iter = iter(data_loader)
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
+    # get model parameters and optimizer state from scratch or from checkpoint --> init_train_state function
     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
     jax.block_until_ready(train_state)
     logging.info(f"Initialized train state:\n{training_utils.array_tree_to_info(train_state.params)}")
@@ -233,6 +252,7 @@ def main(config: _config.TrainConfig):
     if resuming:
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
 
+    # Parallel Training Step --> train_step function
     ptrain_step = jax.jit(
         functools.partial(train_step, config),
         in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
@@ -249,6 +269,7 @@ def main(config: _config.TrainConfig):
     )
 
     infos = []
+    # The training loop.
     for step in pbar:
         with sharding.set_mesh(mesh):
             train_state, info = ptrain_step(train_rng, train_state, batch)
@@ -270,4 +291,5 @@ def main(config: _config.TrainConfig):
 
 
 if __name__ == "__main__":
+    # eg. get pi0_locoman TrainConfig, and override the config with cli args.
     main(_config.cli())
